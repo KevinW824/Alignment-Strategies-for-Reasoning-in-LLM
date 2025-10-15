@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+.python-version
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Models and checkpoints (these are large!)
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+models/
+checkpoints/
+saved_models/
+
+# Results and experiment outputs
+results/
+outputs/
+logs/
+wandb/
+runs/
+
+# Cache
+.cache/
+*.cache
+.vllm_cache/
+.transformers_cache/
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+instructions.md
