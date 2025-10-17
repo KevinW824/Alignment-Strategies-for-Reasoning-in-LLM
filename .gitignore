@@ -51,8 +51,7 @@ checkpoints/
 saved_models/
 
 # Results and experiment outputs
-results/
-outputs/
+*.out
 logs/
 wandb/
 runs/
@@ -81,4 +80,8 @@ temp/
 *.tmp
 *.bak
 
+# Instructions
 instructions.md
+
+# Server scripts
+run.sh

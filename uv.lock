@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11, <3.13"
 resolution-markers = [
     "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
@@ -135,6 +135,7 @@ source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
     { name = "alpaca-eval" },
+    { name = "flash-attn" },
     { name = "jupyter" },
     { name = "math-verify", extra = ["antlr4-13-2"] },
     { name = "notebook" },
@@ -149,16 +150,11 @@ dependencies = [
     { name = "xopen" },
 ]
 
-[package.optional-dependencies]
-cuda = [
-    { name = "flash-attn" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=1.5.2" },
     { name = "alpaca-eval", git = "https://github.com/nelson-liu/alpaca_eval.git?rev=forward_kwargs_to_vllm" },
-    { name = "flash-attn", marker = "extra == 'cuda'", specifier = "==2.7.4.post1" },
+    { name = "flash-attn", specifier = "==2.7.4.post1" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "math-verify", extras = ["antlr4-13-2"], specifier = ">=0.7.0" },
     { name = "notebook", specifier = ">=7.4.2" },
@@ -172,7 +168,6 @@ requires-dist = [
     { name = "wandb", specifier = ">=0.19.8" },
     { name = "xopen", specifier = ">=2.0.2" },
 ]
-provides-extras = ["cuda"]
 
 [[package]]
 name = "alpaca-eval"
