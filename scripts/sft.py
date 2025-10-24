@@ -190,6 +190,125 @@ def tokenize_prompt_and_output(
 
 
 # ============================================================================
+# Entropy and Log-Probability Utilities
+# ============================================================================
+
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the per-token entropy of next-token predictions.
+    
+    The entropy of a discrete distribution p(x) is:
+        H(p) = -sum_x p(x) log p(x)
+    
+    This function computes the entropy over the vocabulary dimension for each
+    position in the sequence, using a numerically stable implementation.
+    
+    Args:
+        logits: torch.Tensor of shape (batch_size, sequence_length, vocab_size)
+                containing unnormalized logits for next-token predictions
+    
+    Returns:
+        torch.Tensor of shape (batch_size, sequence_length) containing the
+        entropy for each next-token prediction
+    
+    Implementation notes:
+        - Uses log-softmax for numerical stability instead of softmax + log
+        - H(p) = -sum_x p(x) log p(x) = -sum_x exp(log p(x)) * log p(x)
+    """
+    # Compute log probabilities using log_softmax (numerically stable)
+    # Shape: (batch_size, sequence_length, vocab_size)
+    log_probs = F.log_softmax(logits, dim=-1)
+    
+    # Compute probabilities from log probabilities
+    # Shape: (batch_size, sequence_length, vocab_size)
+    probs = torch.exp(log_probs)
+    
+    # Compute entropy: H(p) = -sum_x p(x) * log(p(x))
+    # Shape: (batch_size, sequence_length)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    
+    return entropy
+
+
+def get_response_log_probs(
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    return_token_entropy: bool = False,
+) -> Dict[str, torch.Tensor]:
+    """
+    Get per-token conditional log-probabilities from a causal language model.
+    
+    For a prefix x and label y, computes:
+        log p_θ(y | x) = log[softmax(f_θ(x))]_y
+    
+    Args:
+        model: PreTrainedModel
+            HuggingFace model used for scoring (should be on correct device
+            and in inference mode if gradients should not be computed)
+        input_ids: torch.Tensor
+            Shape (batch_size, sequence_length), concatenated prompt + response
+            tokens as produced by tokenization method
+        labels: torch.Tensor
+            Shape (batch_size, sequence_length), labels as produced by
+            tokenization method (shifted input_ids)
+        return_token_entropy: bool
+            If True, also return per-token entropy
+    
+    Returns:
+        dict[str, torch.Tensor]:
+            "log_probs": Shape (batch_size, sequence_length)
+                Conditional log-probabilities log p_θ(x_t | x_<t)
+            "token_entropy": Optional, shape (batch_size, sequence_length)
+                Per-token entropy (only if return_token_entropy=True)
+    
+    Implementation notes:
+        - Uses log_softmax for numerical stability
+        - Log-probs are not masked; masking happens in the training loop
+    """
+    # Forward pass through model
+    outputs = model(input_ids=input_ids)
+    logits = outputs.logits  # Shape: (batch_size, sequence_length, vocab_size)
+    
+    # Compute log probabilities using log_softmax (numerically stable)
+    # Shape: (batch_size, sequence_length, vocab_size)
+    log_probs_all = F.log_softmax(logits, dim=-1)
+    
+    # Gather the log probabilities for the actual labels
+    # We need to select log_probs_all[b, t, labels[b, t]] for each (b, t)
+    batch_size, seq_length, vocab_size = logits.shape
+    
+    # Reshape for gathering
+    # log_probs_all: (batch_size, sequence_length, vocab_size)
+    # labels: (batch_size, sequence_length)
+    # We want to gather along the vocab dimension
+    
+    # Expand labels to match the shape for gather
+    # labels_expanded: (batch_size, sequence_length, 1)
+    labels_expanded = labels.unsqueeze(-1)
+    
+    # Gather log probabilities for the labels
+    # Shape: (batch_size, sequence_length, 1)
+    log_probs = torch.gather(log_probs_all, dim=-1, index=labels_expanded)
+    
+    # Remove the extra dimension
+    # Shape: (batch_size, sequence_length)
+    log_probs = log_probs.squeeze(-1)
+    
+    # Prepare return dictionary
+    result = {
+        "log_probs": log_probs,
+    }
+    
+    # Optionally compute and return token entropy
+    if return_token_entropy:
+        token_entropy = compute_entropy(logits)
+        result["token_entropy"] = token_entropy
+    
+    return result
+
+
+# ============================================================================
 # Training Utilities
 # ============================================================================
 
