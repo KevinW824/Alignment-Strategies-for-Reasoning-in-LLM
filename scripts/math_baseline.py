@@ -215,7 +215,7 @@ def main(
     Evaluate Qwen 2.5 Math 1.5B zero-shot performance on GSM8K.
     
     Note: GSM8K doesn't have a separate validation set, so we use test.jsonl
-    as the evaluation set (equivalent to MATH validation set in the original assignment).
+    as the evaluation set.
     """
     print("=" * 80)
     print("GSM8K Zero-Shot Baseline Evaluation")

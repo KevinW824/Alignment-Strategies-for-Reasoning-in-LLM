@@ -1,7 +1,7 @@
 [project]
 name = "alignment"
 version = "1.0.0"
-description = "CS 336 Spring 2025 Assignment 5: Alignment"
+description = ""
 readme = "README.md"
 requires-python = ">=3.11,<3.13"  # Python 3.13 not yet supported for some deps
 dependencies = [
