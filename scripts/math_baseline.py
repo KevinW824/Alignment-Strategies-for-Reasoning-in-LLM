@@ -13,6 +13,7 @@ This script:
 import json
 import os
 import sys
+import re
 from typing import List, Dict, Any, Callable
 from pathlib import Path
 
@@ -29,6 +30,7 @@ try:
 except ImportError:
     from drgrpo_grader import r1_zero_reward_fn
 
+ANS_RE = re.compile(r"####\s*([\-0-9\.,]+)")
 
 app = typer.Typer()
 
@@ -51,18 +53,13 @@ def load_jsonl_data(data_path: str) -> List[Dict[str, Any]]:
 
 
 def extract_ground_truth_answer(answer_str: str) -> str:
-    """
-    Extract the final numerical answer from GSM8K answer format.
-    GSM8K answers are in format: "reasoning steps ... #### final_answer"
-    
-    Args:
-        answer_str: The full answer string from GSM8K
-        
-    Returns:
-        The final answer after ####
-    """
+    """Extract numerical answer, handling commas."""
+    match = ANS_RE.search(answer_str)
+    if match:
+        return match.group(1).strip().replace(",", "")
+    # Fallback to original split logic
     if "####" in answer_str:
-        return answer_str.split("####")[1].strip()
+        return answer_str.split("####")[1].strip().replace(",", "")
     return answer_str.strip()
 
 
@@ -162,17 +159,15 @@ def evaluate_vllm(
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
         
-        # Save detailed results
-        results_path = os.path.join(output_dir, "evaluation_results.json")
+        # Save per-example results as JSONL (streaming-friendly)
+        results_path = os.path.join(output_dir, "evaluation_results.jsonl")
         with open(results_path, 'w') as f:
-            json.dump({
-                "generations": generations,
-                "rewards": rewards,
-                "metrics": metrics,
-            }, f, indent=2)
+            for gen, reward in zip(generations, rewards):
+                json.dump({"generation": gen, "reward": reward}, f)
+                f.write('\n')
         print(f"\nResults saved to {results_path}")
         
-        # Save metrics separately
+        # Save metrics as JSON (single summary)
         metrics_path = os.path.join(output_dir, "metrics.json")
         with open(metrics_path, 'w') as f:
             json.dump(metrics, f, indent=2)
