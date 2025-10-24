@@ -141,10 +141,7 @@ def tokenize_prompt_and_output(
     labels_padded = []
     response_mask_padded = []
     
-    pad_token_id = tokenizer.pad_token_id
-    if pad_token_id is None:
-        # Use eos_token_id as pad if pad_token_id not set
-        pad_token_id = tokenizer.eos_token_id
+    pad_token_id = 0
     
     for i in range(batch_size):
         ids = combined_input_ids[i]
@@ -152,32 +149,33 @@ def tokenize_prompt_and_output(
         seq_len = len(ids)
         
         # For autoregressive training, we need input_ids[:-1] and labels[1:]
-        # input_ids: tokens 0 to n-2 (predict next token)
-        # labels: tokens 1 to n-1 (targets)
-        
         # Pad to max_length - 1 (since we remove last token)
         target_len = max_length - 1
         
-        # input_ids: remove last token, then pad
+        # input_ids: remove last token, then pad with 0s and one final EOS
         input_ids = ids[:-1]  # Remove last token
         padding_length = target_len - len(input_ids)
-        input_ids = input_ids + [pad_token_id] * padding_length
+        if padding_length > 0:
+            # Pad with 0s, then add final EOS token
+            input_ids = input_ids + [pad_token_id] * (padding_length - 1) + [tokenizer.eos_token_id]
         
-        # labels: remove first token, then pad (shifted version of input_ids)
+        # labels: remove first token, then pad with EOS tokens
         labels = ids[1:]  # Remove first token
-        labels = labels + [pad_token_id] * padding_length
+        if padding_length > 0:
+            labels = labels + [tokenizer.eos_token_id] * padding_length
         
         # response_mask: 1 for response tokens, 0 for prompt and padding
-        # Response starts at prompt_len-1 (in input_ids) since we removed first token
-        # Response starts at prompt_len in labels since we removed first token
+        # In labels (which is ids[1:]), the response starts at index (prompt_len - 1)
+        # because we removed the first token from ids
         response_mask = [0] * target_len
         
-        # Mark response tokens (everything after prompt)
-        # In the input_ids/labels, response starts at index prompt_len-1
-        response_start = prompt_len - 1  # Adjusted for removing first token
-        response_end = seq_len - 1  # Adjusted for removing last token
+        # Mark response tokens (everything after prompt, before padding)
+        # Response starts at index (prompt_len - 1) in labels
+        # Response ends at index (seq_len - 1) in labels (before padding starts)
+        response_start = prompt_len - 1
+        response_end = min(len(ids) - 1, target_len)  # Actual content length in labels
         
-        for j in range(response_start, min(response_end, target_len)):
+        for j in range(response_start, response_end):
             response_mask[j] = 1
         
         input_ids_padded.append(input_ids)
@@ -337,11 +335,6 @@ def main(
     # Load tokenizer and model
     print(f"\nLoading model and tokenizer from {model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    
-    # Set pad token if not set
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        print(f"Set pad_token to eos_token: {tokenizer.eos_token}")
     
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
