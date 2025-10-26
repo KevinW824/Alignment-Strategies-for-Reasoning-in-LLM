@@ -92,29 +92,9 @@ case $EXPERIMENT_TYPE in
             --vllm_device cuda:1
         ;;
     
-    "correct")
-        echo "Filtering dataset to correct examples..."
-        srun --partition=gpucluster .venv/bin/python scripts/filter_sft_data.py \
-            --input_path data/gsm8k/sft.jsonl \
-            --output_path data/gsm8k/sft_correct.jsonl
-        
-        echo "Training with correct examples only..."
-        srun --partition=gpucluster .venv/bin/python scripts/train_sft.py \
-            --sft_data_path data/gsm8k/sft_correct.jsonl \
-            --learning_rate 1e-5 \
-            --batch_size 8 \
-            --microbatch_size 2 \
-            --num_epochs 3 \
-            --eval_every_n_steps 100 \
-            --output_dir outputs/sft_correct \
-            --run_name sft_correct_only \
-            --policy_device cuda:0 \
-            --vllm_device cuda:1
-        ;;
-    
     *)
         echo "Unknown experiment type: $EXPERIMENT_TYPE"
-        echo "Valid options: 128, 256, 512, 1024, full, correct"
+        echo "Valid options: 128, 256, 512, 1024, full"
         exit 1
         ;;
 esac
