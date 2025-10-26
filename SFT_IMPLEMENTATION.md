@@ -553,3 +553,427 @@ Run the test with:
 ```
 
 Expected output: `PASSED`
+
+---
+
+## Masked Normalization for SFT Loss
+
+### Purpose
+
+The SFT loss is the negative log-likelihood of the target output given the prompt. We need to:
+1. Sum log-probabilities only over response tokens (exclude prompt and padding)
+2. Normalize by a constant (e.g., number of response tokens, batch size)
+
+The `masked_normalize` function is a general utility for this pattern.
+
+### Function Signature
+
+```python
+def masked_normalize(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    normalize_constant: float = 1.0,
+    dim: int | None = None,
+) -> torch.Tensor:
+    """
+    Sum over tensor elements and normalize by a constant while respecting a mask.
+    
+    Args:
+        tensor: The tensor to sum and normalize
+        mask: Same shape as tensor; positions with 1 are included,
+              positions with 0 are excluded
+        normalize_constant: The constant to divide by (default: 1.0)
+        dim: Dimension to sum along. If None, sum over all dimensions
+    
+    Returns:
+        Normalized sum where masked elements (mask == 0) don't contribute
+        - If dim is None: returns a scalar
+        - If dim is specified: returns tensor with that dimension reduced
+    """
+```
+
+### Implementation
+
+```python
+def masked_normalize(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    normalize_constant: float = 1.0,
+    dim: Optional[int] = None,
+) -> torch.Tensor:
+    # Apply mask: only keep elements where mask == 1
+    masked_tensor = tensor * mask
+    
+    # Sum over specified dimension(s)
+    if dim is None:
+        # Sum over all dimensions (returns scalar)
+        result = masked_tensor.sum()
+    else:
+        # Sum over specified dimension
+        result = masked_tensor.sum(dim=dim)
+    
+    # Normalize by the constant
+    result = result / normalize_constant
+    
+    return result
+```
+
+### Usage Examples
+
+**Example 1: SFT Loss (scalar)**
+```python
+# Compute per-token log-probs
+outputs = get_response_log_probs(model, input_ids, labels)
+log_probs = outputs['log_probs']  # (batch_size, seq_len)
+
+# SFT loss: negative log-likelihood on response tokens only
+# Loss = -sum(log_probs * response_mask) / num_response_tokens
+num_response_tokens = response_mask.sum()
+loss = masked_normalize(
+    tensor=-log_probs,
+    mask=response_mask,
+    normalize_constant=num_response_tokens,
+    dim=None,  # Sum over all dimensions
+)
+# Returns a scalar loss
+```
+
+**Example 2: Per-Sequence Loss**
+```python
+# Compute loss for each sequence in the batch
+per_seq_loss = masked_normalize(
+    tensor=-log_probs,
+    mask=response_mask,
+    normalize_constant=1.0,
+    dim=1,  # Sum over sequence dimension
+)
+# Returns shape: (batch_size,)
+# Each element is the sum of -log_probs for that sequence
+
+# Then average over batch
+batch_loss = per_seq_loss.mean()
+```
+
+**Example 3: Normalize by Sequence Lengths**
+```python
+# Normalize each sequence by its own length
+seq_lengths = response_mask.sum(dim=1, keepdim=True)  # (batch_size, 1)
+
+# Compute per-token average for each sequence
+per_seq_avg = masked_normalize(
+    tensor=-log_probs,
+    mask=response_mask,
+    normalize_constant=1.0,
+    dim=1,  # Sum over sequence
+) / seq_lengths.squeeze()
+# Returns shape: (batch_size,)
+# Each element is the average -log_prob per token for that sequence
+```
+
+**Example 4: Different Dimensions**
+```python
+tensor = torch.tensor([
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0, 6.0]
+])
+mask = torch.tensor([
+    [1.0, 1.0, 0.0],  # Include first 2 positions
+    [1.0, 0.0, 0.0]   # Include only first position
+])
+
+# Sum all masked elements, normalize by 2
+result = masked_normalize(tensor, mask, normalize_constant=2.0, dim=None)
+# (1 + 2 + 4) / 2 = 3.5
+
+# Sum along dimension 1 (columns), normalize by 2
+result = masked_normalize(tensor, mask, normalize_constant=2.0, dim=1)
+# [(1 + 2) / 2, (4) / 2] = [1.5, 2.0]
+
+# Sum along dimension 0 (rows), normalize by 2
+result = masked_normalize(tensor, mask, normalize_constant=2.0, dim=0)
+# [(1 + 4) / 2, (2) / 2, (0) / 2] = [2.5, 1.0, 0.0]
+```
+
+### Common Normalization Strategies
+
+**1. Normalize by total number of response tokens (Dr. GRPO style):**
+```python
+num_response_tokens = response_mask.sum()  # Scalar
+loss = masked_normalize(-log_probs, response_mask, num_response_tokens, dim=None)
+```
+
+**2. Normalize by batch size:**
+```python
+batch_size = log_probs.shape[0]
+loss = masked_normalize(-log_probs, response_mask, batch_size, dim=None)
+```
+
+**3. Normalize by average sequence length:**
+```python
+avg_seq_len = response_mask.sum() / response_mask.shape[0]
+loss = masked_normalize(-log_probs, response_mask, avg_seq_len, dim=None)
+```
+
+**4. Per-sequence normalization, then batch average:**
+```python
+# First, get per-sequence sums
+per_seq_sum = masked_normalize(-log_probs, response_mask, 1.0, dim=1)  # (batch_size,)
+
+# Then normalize by sequence lengths
+seq_lengths = response_mask.sum(dim=1)  # (batch_size,)
+per_seq_avg = per_seq_sum / seq_lengths
+
+# Average over batch
+loss = per_seq_avg.mean()
+```
+
+### Key Points
+
+1. **Masking happens before summation**: `masked_tensor = tensor * mask` ensures masked-out positions contribute 0 to the sum
+
+2. **Flexible normalization**: The `normalize_constant` can be any value:
+   - Total tokens: `response_mask.sum()`
+   - Batch size: `tensor.shape[0]`
+   - Custom constant: e.g., `1.0` for unnormalized sum
+
+3. **Dimension flexibility**: 
+   - `dim=None`: Returns scalar (sum over everything)
+   - `dim=0`: Sum over batch dimension
+   - `dim=1`: Sum over sequence dimension
+   - `dim=-1`: Sum over last dimension
+
+4. **Gradient flow**: Gradients flow through the masked sum and division, so this can be used in training
+
+### Testing
+
+Run the tests with:
+```bash
+.venv/bin/pytest -k test_masked_normalize -v
+```
+
+Expected output: Multiple tests should `PASS` for different dimensions
+
+---
+
+## SFT Microbatch Training Step
+
+### Purpose
+
+The SFT training loop processes data in minibatches, which are further split into microbatches when using gradient accumulation. This function implements a single microbatch update including:
+1. Computing the negative log-likelihood loss
+2. Masking to response tokens only
+3. Scaling gradients for accumulation
+4. Performing the backward pass
+
+### The SFT Loss
+
+The loss we minimize in SFT is the negative log-likelihood of the target output given the prompt:
+
+```
+L_SFT = -∑_{t∈response} log p_θ(token_t | tokens_{<t})
+```
+
+In practice:
+```python
+loss = -sum(log_probs * response_mask) / normalize_constant
+```
+
+### Function Signature
+
+```python
+def sft_microbatch_train_step(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    gradient_accumulation_steps: int,
+    normalize_constant: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """
+    Execute a single SFT microbatch training step.
+    
+    Args:
+        policy_log_probs: Shape (batch_size, sequence_length)
+                         Per-token log-probabilities from policy
+        response_mask: Shape (batch_size, sequence_length)
+                      1 for response tokens, 0 for prompt/padding
+        gradient_accumulation_steps: Number of microbatches per optimizer step
+        normalize_constant: Constant to divide sum by (default: 1.0)
+    
+    Returns:
+        tuple:
+            loss: Scalar tensor - the scaled loss that was backward'd
+            metadata: Dict with both scaled and unscaled loss, and other stats
+    """
+```
+
+### Implementation
+
+```python
+def sft_microbatch_train_step(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    gradient_accumulation_steps: int,
+    normalize_constant: float = 1.0,
+) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    # Compute SFT loss: negative log-likelihood on response tokens
+    loss = masked_normalize(
+        tensor=-policy_log_probs,
+        mask=response_mask,
+        normalize_constant=normalize_constant,
+        dim=None,  # Sum over all dimensions
+    )
+    
+    # Scale loss for gradient accumulation
+    # Gradients will be: grad_1/N + grad_2/N + ... + grad_N/N
+    scaled_loss = loss / gradient_accumulation_steps
+    
+    # Backward pass (accumulates gradients)
+    scaled_loss.backward()
+    
+    # Prepare metadata for logging
+    metadata = {
+        "scaled_loss": scaled_loss.detach(),
+        "unscaled_loss": loss.detach(),
+        "num_response_tokens": response_mask.sum().detach(),
+    }
+    
+    # Return the scaled loss (what was actually backward'd)
+    return scaled_loss.detach(), metadata
+```
+
+### Understanding Gradient Accumulation
+
+When training with gradient accumulation, we split each minibatch into N microbatches:
+
+**Without Gradient Accumulation (N=1):**
+```python
+# Process full batch
+loss = compute_loss(batch)
+loss.backward()
+optimizer.step()
+optimizer.zero_grad()
+```
+
+**With Gradient Accumulation (N>1):**
+```python
+optimizer.zero_grad()
+for microbatch in split_into_N_microbatches(batch):
+    loss = compute_loss(microbatch)
+    scaled_loss = loss / N  # Scale before backward!
+    scaled_loss.backward()  # Accumulates: grad += scaled_grad
+optimizer.step()
+optimizer.zero_grad()
+```
+
+**Why scale?** We want the final gradient to be the average:
+```
+final_grad = (grad_1 + grad_2 + ... + grad_N) / N
+           = grad_1/N + grad_2/N + ... + grad_N/N
+```
+
+So we scale each loss by `1/N` before calling `.backward()`.
+
+### Complete Training Loop Example
+
+```python
+# Setup
+model = AutoModelForCausalLM.from_pretrained("model_name")
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+gradient_accumulation_steps = 4
+
+# Training loop
+for minibatch in dataloader:
+    optimizer.zero_grad()  # Zero gradients at start of minibatch
+    
+    # Split minibatch into microbatches
+    microbatches = split_into_microbatches(minibatch, gradient_accumulation_steps)
+    
+    total_loss = 0.0
+    for microbatch in microbatches:
+        # Tokenize
+        batch = tokenize_prompt_and_output(
+            microbatch['prompts'],
+            microbatch['outputs'],
+            tokenizer,
+        )
+        
+        # Get log-probs from model
+        outputs = get_response_log_probs(
+            model=model,
+            input_ids=batch['input_ids'],
+            labels=batch['labels'],
+            return_token_entropy=False,
+        )
+        
+        # Microbatch train step (computes loss, scales, and backprops)
+        loss, metadata = sft_microbatch_train_step(
+            policy_log_probs=outputs['log_probs'],
+            response_mask=batch['response_mask'],
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            normalize_constant=1.0,
+        )
+        
+        total_loss += loss.item()
+    
+    # After all microbatches, take optimizer step
+    optimizer.step()
+    
+    # Log average loss (note: loss is already scaled, so just average)
+    avg_loss = total_loss / gradient_accumulation_steps
+    print(f"Scaled Loss: {avg_loss:.4f}")
+    
+    # Or use unscaled loss from metadata for more interpretable logging
+    # avg_unscaled_loss = sum(m['unscaled_loss'] for m in metadatas) / len(metadatas)
+```
+
+### Key Implementation Details
+
+1. **Loss Scaling**: The loss is scaled by `1/gradient_accumulation_steps` BEFORE calling `.backward()`
+   - This ensures gradients accumulate to the correct average
+
+2. **Return Scaled Loss**: We return `scaled_loss.detach()` (the value that was backward'd)
+   - This is consistent with the gradients that were computed
+   - The metadata includes both `scaled_loss` and `unscaled_loss` for flexibility
+
+3. **Detached Metadata**: All returned values are `.detach()`'ed
+   - Prevents memory leaks from keeping computation graph in memory
+
+4. **Flexible Normalization**: The `normalize_constant` parameter allows different normalization strategies:
+   - `1.0`: Raw sum of negative log-probs
+   - `num_response_tokens`: Average per-token loss
+   - `batch_size`: Average per-sequence loss
+
+### Normalization Strategies Comparison
+
+```python
+# Strategy 1: No normalization (sum)
+loss, _ = sft_microbatch_train_step(
+    policy_log_probs, response_mask,
+    gradient_accumulation_steps=4,
+    normalize_constant=1.0,
+)
+
+# Strategy 2: Normalize by total tokens (per-token average)
+num_tokens = response_mask.sum()
+loss, _ = sft_microbatch_train_step(
+    policy_log_probs, response_mask,
+    gradient_accumulation_steps=4,
+    normalize_constant=num_tokens.item(),
+)
+
+# Strategy 3: Normalize by batch size
+batch_size = policy_log_probs.shape[0]
+loss, _ = sft_microbatch_train_step(
+    policy_log_probs, response_mask,
+    gradient_accumulation_steps=4,
+    normalize_constant=batch_size,
+)
+```
+
+### Testing
+
+Run the test with:
+```bash
+.venv/bin/pytest -k test_sft_microbatch_train_step -v
+```
+
+Expected output: `PASSED`

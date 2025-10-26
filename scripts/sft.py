@@ -308,6 +308,284 @@ def get_response_log_probs(
     return result
 
 
+def masked_normalize(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    normalize_constant: float = 1.0,
+    dim: Optional[int] = None,
+) -> torch.Tensor:
+    """
+    Sum over tensor elements and normalize by a constant while respecting a mask.
+    
+    This is useful for computing masked losses where we want to:
+    1. Only sum over valid positions (mask == 1)
+    2. Normalize by a constant (e.g., batch size, number of tokens)
+    
+    Args:
+        tensor: torch.Tensor
+            The tensor to sum and normalize
+        mask: torch.Tensor
+            Same shape as tensor; positions with 1 are included in the sum,
+            positions with 0 are excluded
+        normalize_constant: float
+            The constant to divide by for normalization (default: 1.0)
+        dim: int | None
+            The dimension to sum along before normalization.
+            If None, sum over all dimensions (returns scalar)
+    
+    Returns:
+        torch.Tensor
+            The normalized sum where masked elements (mask == 0) don't contribute.
+            - If dim is None: returns a scalar
+            - If dim is specified: returns tensor with that dimension reduced
+    
+    Examples:
+        >>> tensor = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        >>> mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+        >>> 
+        >>> # Sum all masked elements, normalize by 2
+        >>> masked_normalize(tensor, mask, normalize_constant=2.0, dim=None)
+        >>> # (1 + 2 + 4) / 2 = 3.5
+        >>> 
+        >>> # Sum along dim=1, normalize by 2
+        >>> masked_normalize(tensor, mask, normalize_constant=2.0, dim=1)
+        >>> # [(1 + 2) / 2, (4) / 2] = [1.5, 2.0]
+    """
+    # Apply mask: only keep elements where mask == 1
+    # Elements where mask == 0 become 0 and don't contribute to sum
+    masked_tensor = tensor * mask
+    
+    # Sum over specified dimension(s)
+    if dim is None:
+        # Sum over all dimensions (returns scalar)
+        result = masked_tensor.sum()
+    else:
+        # Sum over specified dimension
+        result = masked_tensor.sum(dim=dim)
+    
+    # Normalize by the constant
+    result = result / normalize_constant
+    
+    return result
+
+
+def log_generations(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    prompts: List[str],
+    ground_truths: List[str],
+    reward_fn: Any,
+    sampling_params: Optional[Dict[str, Any]] = None,
+    max_examples: int = 5,
+) -> Dict[str, Any]:
+    """
+    Generate responses from the model and log detailed statistics.
+    
+    This function is useful for in-the-loop monitoring during SFT/RL training.
+    It generates responses for validation prompts and computes various metrics.
+    
+    Args:
+        model: PreTrainedModel
+            The model to generate from (should be in eval mode)
+        tokenizer: PreTrainedTokenizer
+            Tokenizer for encoding/decoding
+        prompts: List[str]
+            Input prompts to generate responses for
+        ground_truths: List[str]
+            Ground truth answers for computing rewards
+        reward_fn: Callable[[str, str], dict[str, float]]
+            Function that takes (response, ground_truth) and returns
+            dict with "format_reward", "answer_reward", "reward"
+        sampling_params: Optional[Dict[str, Any]]
+            Sampling parameters (temperature, top_p, max_tokens, etc.)
+        max_examples: int
+            Maximum number of examples to log (default: 5)
+    
+    Returns:
+        Dict[str, Any] containing:
+            - "examples": List of dicts with per-example details
+            - "metrics": Aggregated metrics across all examples
+    """
+    # Default sampling parameters
+    if sampling_params is None:
+        sampling_params = {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "max_new_tokens": 512,
+            "do_sample": True,
+        }
+    
+    # Limit number of examples
+    num_examples = min(len(prompts), max_examples)
+    prompts = prompts[:num_examples]
+    ground_truths = ground_truths[:num_examples]
+    
+    # Set model to eval mode
+    was_training = model.training
+    model.eval()
+    
+    examples = []
+    all_rewards = []
+    all_entropies = []
+    all_response_lengths = []
+    correct_response_lengths = []
+    incorrect_response_lengths = []
+    
+    with torch.no_grad():
+        for prompt, ground_truth in zip(prompts, ground_truths):
+            # Tokenize prompt
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+            
+            # Generate response
+            output_ids = model.generate(
+                **inputs,
+                **sampling_params,
+                return_dict_in_generate=True,
+                output_scores=True,
+            )
+            
+            # Decode generated tokens (excluding prompt)
+            generated_ids = output_ids.sequences[0][inputs.input_ids.shape[1]:]
+            response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            
+            # Compute reward
+            reward_dict = reward_fn(response, ground_truth)
+            all_rewards.append(reward_dict)
+            
+            # Compute average token entropy for the response
+            if output_ids.scores:  # If we have logits
+                # Stack logits: (seq_len, batch_size=1, vocab_size)
+                logits = torch.stack(output_ids.scores, dim=0)
+                # Reshape to (batch_size=1, seq_len, vocab_size)
+                logits = logits.transpose(0, 1)
+                
+                # Compute entropy
+                entropies = compute_entropy(logits)  # (1, seq_len)
+                avg_entropy = entropies.mean().item()
+                all_entropies.append(avg_entropy)
+            else:
+                avg_entropy = None
+            
+            # Response length
+            response_length = len(generated_ids)
+            all_response_lengths.append(response_length)
+            
+            if reward_dict["answer_reward"] == 1.0:
+                correct_response_lengths.append(response_length)
+            else:
+                incorrect_response_lengths.append(response_length)
+            
+            # Store example details
+            example = {
+                "prompt": prompt,
+                "response": response,
+                "ground_truth": ground_truth,
+                "format_reward": reward_dict["format_reward"],
+                "answer_reward": reward_dict["answer_reward"],
+                "total_reward": reward_dict["reward"],
+                "avg_token_entropy": avg_entropy,
+                "response_length": response_length,
+            }
+            examples.append(example)
+    
+    # Restore training mode if needed
+    if was_training:
+        model.train()
+    
+    # Compute aggregated metrics
+    metrics = {
+        "num_examples": num_examples,
+        "avg_format_reward": sum(r["format_reward"] for r in all_rewards) / num_examples,
+        "avg_answer_reward": sum(r["answer_reward"] for r in all_rewards) / num_examples,
+        "avg_total_reward": sum(r["reward"] for r in all_rewards) / num_examples,
+        "accuracy": sum(r["answer_reward"] for r in all_rewards) / num_examples,
+        "format_correct_count": sum(1 for r in all_rewards if r["format_reward"] == 1.0),
+        "answer_correct_count": sum(1 for r in all_rewards if r["answer_reward"] == 1.0),
+        "avg_response_length": sum(all_response_lengths) / len(all_response_lengths) if all_response_lengths else 0,
+        "avg_response_length_correct": sum(correct_response_lengths) / len(correct_response_lengths) if correct_response_lengths else 0,
+        "avg_response_length_incorrect": sum(incorrect_response_lengths) / len(incorrect_response_lengths) if incorrect_response_lengths else 0,
+    }
+    
+    if all_entropies:
+        metrics["avg_token_entropy"] = sum(all_entropies) / len(all_entropies)
+    
+    return {
+        "examples": examples,
+        "metrics": metrics,
+    }
+
+
+def sft_microbatch_train_step(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    gradient_accumulation_steps: int,
+    normalize_constant: float = 1.0,
+) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """
+    Execute a single SFT microbatch training step (forward + backward).
+    
+    Computes the negative log-likelihood loss on response tokens, scales gradients
+    for gradient accumulation, and performs backward pass.
+    
+    The SFT loss is:
+        L = -sum(log p(token) * mask) / normalize_constant
+    
+    Args:
+        policy_log_probs: torch.Tensor
+            Shape (batch_size, sequence_length)
+            Per-token log-probabilities from the policy being trained
+        response_mask: torch.Tensor
+            Shape (batch_size, sequence_length)
+            Binary mask: 1 for response tokens, 0 for prompt/padding
+        gradient_accumulation_steps: int
+            Number of microbatches per optimizer step
+            Gradients are scaled by 1/gradient_accumulation_steps
+        normalize_constant: float
+            Constant to divide the sum by (default: 1.0)
+            Can be set to number of response tokens for per-token averaging
+    
+    Returns:
+        tuple[torch.Tensor, dict[str, torch.Tensor]]:
+            loss: Scalar tensor, the scaled microbatch loss (what was backward'd)
+            metadata: Dict with loss statistics and any other metrics
+    
+    Implementation notes:
+        - Calls loss.backward() with gradient scaling
+        - SFT minimizes negative log-likelihood: loss = -sum(log_probs * mask)
+        - Returns the scaled loss (consistent with what gradients represent)
+    """
+    # Compute SFT loss: negative log-likelihood on response tokens
+    # Loss = -sum(log_probs * response_mask) / (normalize_constant * gradient_accumulation_steps)
+    # We incorporate gradient_accumulation_steps into the normalization
+    loss = masked_normalize(
+        tensor=-policy_log_probs,
+        mask=response_mask,
+        normalize_constant=normalize_constant * gradient_accumulation_steps * 2,
+        dim=None,  # Sum over all dimensions (returns scalar)
+    )
+    
+    # Backward pass (accumulates gradients)
+    loss.backward()
+    
+    # Prepare metadata for logging
+    # Store the unscaled loss (before gradient accumulation adjustment)
+    unscaled_loss = masked_normalize(
+        tensor=-policy_log_probs,
+        mask=response_mask,
+        normalize_constant=normalize_constant,
+        dim=None,
+    )
+    
+    metadata = {
+        "loss": loss.detach(),
+        "unscaled_loss": unscaled_loss.detach(),
+        "num_response_tokens": response_mask.sum().detach(),
+    }
+    
+    # Return the loss (with gradient accumulation scaling baked in)
+    return loss.detach(), metadata
+
+
 # ============================================================================
 # Training Utilities
 # ============================================================================
