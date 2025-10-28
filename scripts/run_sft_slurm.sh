@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=sft_training
+#SBATCH --job-name=sft+RT_training
 #SBATCH --partition=gpucluster
-#SBATCH --output=sft_training_%j.out
+#SBATCH --output=sft+RT_training_%j.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 
@@ -27,8 +27,8 @@ case $EXPERIMENT_TYPE in
             --microbatch_size 1 \
             --num_epochs 5 \
             --eval_every_n_steps 50 \
-            --output_dir outputs/sft_128 \
-            --run_name sft_128_examples \
+            --output_dir outputs/sft+RT_128 \
+            --run_name sft+RT_128_examples \
             --policy_device cuda:0 \
             --vllm_device cuda:1
         ;;
@@ -42,8 +42,8 @@ case $EXPERIMENT_TYPE in
             --microbatch_size 1 \
             --num_epochs 5 \
             --eval_every_n_steps 50 \
-            --output_dir outputs/sft_256 \
-            --run_name sft_256_examples \
+            --output_dir outputs/sft+RT_256 \
+            --run_name sft+RT_256_examples \
             --policy_device cuda:0 \
             --vllm_device cuda:1
         ;;
@@ -57,8 +57,8 @@ case $EXPERIMENT_TYPE in
             --microbatch_size 1 \
             --num_epochs 3 \
             --eval_every_n_steps 100 \
-            --output_dir outputs/sft_512 \
-            --run_name sft_512_examples \
+            --output_dir outputs/sft+RT_512 \
+            --run_name sft+RT_512_examples \
             --policy_device cuda:0 \
             --vllm_device cuda:1
         ;;
@@ -72,8 +72,8 @@ case $EXPERIMENT_TYPE in
             --microbatch_size 1 \
             --num_epochs 3 \
             --eval_every_n_steps 100 \
-            --output_dir outputs/sft_1024 \
-            --run_name sft_1024_examples \
+            --output_dir outputs/sft+RT_1024 \
+            --run_name sft+RT_1024_examples \
             --policy_device cuda:0 \
             --vllm_device cuda:1
         ;;
@@ -86,8 +86,23 @@ case $EXPERIMENT_TYPE in
             --microbatch_size 2 \
             --num_epochs 3 \
             --eval_every_n_steps 100 \
-            --output_dir outputs/sft_full \
-            --run_name sft_full_dataset \
+            --output_dir outputs/sft+RT_full \
+            --run_name sft+RT_full_dataset \
+            --policy_device cuda:0 \
+            --vllm_device cuda:1
+        ;;
+
+    "correct")
+        echo "Training with correct dataset only..."
+        srun --partition=gpucluster .venv/bin/python scripts/train_sft.py \
+            --sft_data_path data/gsm8k/sft_r1_correct.jsonl \
+            --learning_rate 1e-5 \
+            --batch_size 8 \
+            --microbatch_size 2 \
+            --num_epochs 3 \
+            --eval_every_n_steps 100 \
+            --output_dir outputs/sft+RT_full \
+            --run_name sft+RT_full_dataset \
             --policy_device cuda:0 \
             --vllm_device cuda:1
         ;;

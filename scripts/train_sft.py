@@ -80,7 +80,7 @@ class TrainingConfig:
     # Logging and saving
     output_dir: str = "outputs/sft"
     save_every_n_steps: int = 500
-    project_name: str = "sft-qwen-math"
+    project_name: str = "sft+RT-qwen-math"
     run_name: Optional[str] = None
     seed: int = 42
 
@@ -205,7 +205,6 @@ def train_sft(config: TrainingConfig):
         project=config.project_name,
         name=config.run_name,
         config=vars(config),
-        mode="offline",  # Use offline mode (no API key needed)
     )
     
     # Setup wandb metrics with separate x-axes for train and eval
@@ -488,7 +487,7 @@ def main():
     # Logging arguments
     parser.add_argument("--output_dir", type=str, default="outputs/sft")
     parser.add_argument("--run_name", type=str, default=None)
-    parser.add_argument("--project_name", type=str, default="sft-qwen-math")
+    parser.add_argument("--project_name", type=str, default="sft+RT-qwen-math")
     parser.add_argument("--seed", type=int, default=42)
     
     args = parser.parse_args()
