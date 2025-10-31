@@ -13,6 +13,7 @@ This script implements Algorithm 2 (Expert Iteration) from the assignment:
 import json
 import os
 import sys
+import random
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -38,7 +39,11 @@ from vllm.model_executor import set_random_seed as vllm_set_random_seed
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from sft import (tokenize_prompt_and_output, sft_microbatch_train_step)
+from sft import (
+    tokenize_prompt_and_output,
+    sft_microbatch_train_step,
+    get_response_log_probs,
+)
 from drgrpo_grader import r1_zero_reward_fn
 from math_baseline import load_jsonl_data, extract_ground_truth_answer
 
@@ -335,7 +340,6 @@ def train_expert_iteration(config: TrainingConfig):
         # ===================================================================
         # STEP 1: Sample questions for this EI iteration
         # ===================================================================
-        import random
         random.seed(config.seed + ei_step)
         step_examples = random.sample(train_examples, config.questions_per_step)
         step_questions = [ex["question"] for ex in step_examples]
@@ -443,26 +447,38 @@ def train_expert_iteration(config: TrainingConfig):
                 labels = tokenized["labels"].to(config.policy_device)
                 response_mask = tokenized["response_mask"].to(config.policy_device)
                 
-                # SFT training step (same as SFT)
-                loss_scalar, metadata = sft_microbatch_train_step(
+                # Get log probabilities (same as SFT)
+                outputs = get_response_log_probs(
                     model=policy,
-                    optimizer=optimizer,
                     input_ids=input_ids,
                     labels=labels,
-                    response_mask=response_mask,
-                    grad_accum_steps=gradient_accumulation_steps,
+                    return_token_entropy=False,
                 )
                 
-                epoch_loss += loss_scalar
-                num_batches += 1
-                global_step += 1
+                # SFT training step (same as SFT)
+                loss, metadata = sft_microbatch_train_step(
+                    policy_log_probs=outputs['log_probs'],
+                    response_mask=response_mask,
+                    gradient_accumulation_steps=gradient_accumulation_steps,
+                    normalize_constant=1.0,
+                )
                 
-                # Update learning rate (same as SFT)
+                epoch_loss += loss.item()
+                num_batches += 1
+                
+                # Optimizer step after accumulating gradients (same as SFT)
                 if num_batches % gradient_accumulation_steps == 0:
+                    # Gradient clipping (required by assignment)
+                    torch.nn.utils.clip_grad_norm_(policy.parameters(), config.gradient_clip_value)
+                    
+                    optimizer.step()
                     scheduler.step()
+                    optimizer.zero_grad()
+                    
+                    global_step += 1
                 
                 # Update progress bar
-                progress_bar.set_postfix({'loss': loss_scalar})
+                progress_bar.set_postfix({'loss': loss.item()})
             
             avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
             epoch_losses.append(avg_epoch_loss)
@@ -476,7 +492,11 @@ def train_expert_iteration(config: TrainingConfig):
             "train/filtered_dataset_size": len(filtered_dataset),
             "ei_step": ei_step,
         })
-        
+
+        # Reload policy weights into vLLM
+        print(f"\nReloading policy weights into vLLM after EI step {ei_step}...")
+        load_policy_into_vllm_instance(policy, vllm_model)
+
         # ===================================================================
         # STEP 6: Evaluate on validation set
         # ===================================================================

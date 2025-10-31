@@ -81,7 +81,7 @@ def compute_rewards(
         rollouts: List of lists, rollouts[i] contains G responses for questions[i]
         ground_truths: List of correct answers
         reward_function: Function that takes (question, response, ground_truth)
-                        and returns dict with 'format', 'answer', 'total' rewards
+                        and returns dict with 'format_reward', 'answer_reward', 'reward' keys
         
     Returns:
         Dictionary with keys 'format', 'answer', 'total', each containing
@@ -101,9 +101,9 @@ def compute_rewards(
             # Get reward breakdown from reward function
             reward_dict = reward_function(question, response, ground_truth)
             
-            question_format_rewards.append(reward_dict['format'])
-            question_answer_rewards.append(reward_dict['answer'])
-            question_total_rewards.append(reward_dict['total'])
+            question_format_rewards.append(reward_dict['format_reward'])
+            question_answer_rewards.append(reward_dict['answer_reward'])
+            question_total_rewards.append(reward_dict['reward'])
         
         format_rewards.append(question_format_rewards)
         answer_rewards.append(question_answer_rewards)
