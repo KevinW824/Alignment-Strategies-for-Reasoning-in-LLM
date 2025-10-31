@@ -35,9 +35,9 @@ import wandb
 from vllm import LLM, SamplingParams
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
-
-# Add parent directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from pathlib import Path
+project_root = Path(__file__).parent.parent
+os.chdir(project_root)
 
 from sft import (
     tokenize_prompt_and_output,
