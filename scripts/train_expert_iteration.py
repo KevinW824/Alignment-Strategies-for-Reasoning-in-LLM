@@ -206,7 +206,6 @@ def train_expert_iteration(config: TrainingConfig):
         project=config.project_name,
         name=config.run_name,
         config=vars(config),
-        mode="offline"
     )
     wandb.define_metric("ei_step")
     wandb.define_metric("eval_step")
@@ -433,8 +432,8 @@ def train_expert_iteration(config: TrainingConfig):
             
             for batch_idx, batch in enumerate(progress_bar):
                 # Tokenize batch
-                prompts = [ex["prompt"] for ex in batch]
-                responses = [ex["response"] for ex in batch]
+                prompts = batch["prompt"]
+                responses = batch["response"]
                 
                 tokenized = tokenize_prompt_and_output(
                     prompts,
