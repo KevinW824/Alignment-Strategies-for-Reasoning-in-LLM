@@ -1,0 +1,32 @@
+[project]
+name = "re-env"
+version = "0.1.0"
+description = "Isolated environment for reasoning representation experiments"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "torch",
+    "transformers>=4.50.0",
+    "accelerate>=1.5.2",
+    "tqdm>=4.67.1",
+    "peft>=0.17.1",
+    "wandb>=0.22.3",
+    "repeng",
+    "sentence-transformers",
+    "matplotlib>=3.10.7",
+    "datasets>=4.4.1",
+    "latex2sympy2-extended>=1.10.2",
+    "math-verify>=0.8.0",
+    "pylatexenc>=2.10",
+]
+
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
