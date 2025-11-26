@@ -3,7 +3,7 @@ from tqdm import tqdm
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from sft_dataset import format_prompt
+from dataset import format_prompt
 from math_grader import answer_tag_reward_fn
 from utils import extract_final
 
@@ -75,5 +75,5 @@ with open("qwen3_17b_prompts_with_format.json", "w", encoding="utf-8") as f:
 
 print(f"Saved {len(positive)} positive / {len(negative)} negative samples.")
 print(
-    f"📈 Final Accuracy: {total_correct}/{total_samples} = {total_correct / total_samples:.4f}"
+    f"Final Accuracy: {total_correct}/{total_samples} = {total_correct / total_samples:.4f}"
 )

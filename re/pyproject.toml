@@ -18,6 +18,7 @@ dependencies = [
     "latex2sympy2-extended>=1.10.2",
     "math-verify>=0.8.0",
     "pylatexenc>=2.10",
+    "seaborn>=0.13.2",
 ]
 
 [tool.uv]

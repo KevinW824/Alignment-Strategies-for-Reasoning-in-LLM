@@ -26,23 +26,23 @@ from utils import extract_final
 
 @dataclass
 class ValidationConfig:
-    model_name: str = "Qwen/Qwen3-1.7B"
-    # model_name: str = "Qwen/Qwen2.5-Math-1.5B"
+    # model_name: str = "Qwen/Qwen3-1.7B"
+    model_name: str = "Qwen/Qwen2.5-Math-1.5B"
     val_data_path: str = "../data/gsm8k/test.jsonl"
     vector_file_path: str = (
-        # "../outputs/re/contrastive_pca_vectors_qwen2.5_math_with_format_1.5B.pth"
-        "../outputs/re/contrastive_pca_vectors_qwen3_with_format_1.7B.pth"
+        "../outputs/re/contrastive_pca_vectors_qwen2.5_math_with_format_1.5B.pth"
+        # "../outputs/re/contrastive_pca_vectors_qwen3_with_format_1.7B.pth"
     )
 
     injection_layer: Optional[int] = (
         None  # If None, will be dynamically set to the middle layer of the model
     )
 
-    alpha_start: float = -0.4
-    alpha_end: float = 0.4
-    alpha_step: float = 0.02
+    alpha_start: float = -1
+    alpha_end: float = 1
+    alpha_step: float = 0.1
 
-    batch_size: int = 32
+    batch_size: int = 16
     max_new_tokens: int = 512
     max_examples: Optional[int] = None
     output_dir: Optional[str] = None
@@ -113,7 +113,7 @@ def run_validation(config: ValidationConfig):
     tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(
         config.model_name,
         padding_side="left",
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
