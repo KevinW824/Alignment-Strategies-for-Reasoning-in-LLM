@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import LoraConfig, get_peft_model
+from peft import PeftModel
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
@@ -51,7 +51,8 @@ def parse_lora_from_name(name: str):
     """
     m = re.match(r"r(\d+)_a(\d+)_d0p(\d+)", name)
     if not m:
-        raise ValueError(f"Cannot parse LoRA config from folder name: {name}")
+        # Fallback or skip
+        return None
     r = int(m.group(1))
     alpha = int(m.group(2))
     d_str = m.group(3)  # '05' or '1'
@@ -82,15 +83,15 @@ final_acc = {}  # run name -> accuracy
 
 for run_dir in run_dirs:
     name = run_dir.name
-    adapter_bin = run_dir / "final" / "adapter_model.bin"
-    if not adapter_bin.exists():
-        print(f"[WARN] {adapter_bin} not found, skipping {name}")
+    final_adapter_dir = run_dir / "final"
+    
+    # Check if adapter config exists
+    if not (final_adapter_dir / "adapter_config.json").exists():
+        print(f"[WARN] Adapter not found in {final_adapter_dir}, skipping {name}")
         continue
 
     print(f"\n=== Evaluating LoRA run: {name} ===")
-    r, alpha, dropout = parse_lora_from_name(name)
-    print(f"LoRA config (from name): r={r}, alpha={alpha}, dropout={dropout}")
-
+    
     # 1) load base model
     print("Loading base model...")
     base_model = AutoModelForCausalLM.from_pretrained(
@@ -99,45 +100,14 @@ for run_dir in run_dirs:
         trust_remote_code=True,
     )
 
-    # 2) build LoRA config (matches adapter target modules)
-    lora_config = LoraConfig(
-        r=r,
-        lora_alpha=alpha,
-        lora_dropout=dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    )
-
-    print("Wrapping base model with LoRA...")
-    model = get_peft_model(base_model, lora_config)
-
-    # 3) load adapter weights, FIXING key names
-    print(f"Loading LoRA weights from {adapter_bin} ...")
-    state = torch.load(adapter_bin, map_location="cpu")
-
-    fixed_state = {}
-    changed = 0
-    for k, v in state.items():
-        new_k = k
-        if ".lora_A.weight" in new_k:
-            new_k = new_k.replace(".lora_A.weight", ".lora_A.default.weight")
-            changed += 1
-        if ".lora_B.weight" in new_k:
-            new_k = new_k.replace(".lora_B.weight", ".lora_B.default.weight")
-            changed += 1
-        fixed_state[new_k] = v
-
-    print(f"Original keys: {len(state)}, after rename: {len(fixed_state)}, renamed entries: {changed}")
-
-    missing, unexpected = model.load_state_dict(fixed_state, strict=False)
-    print(f"Missing keys ({len(missing)}), first 5:", missing[:5])
-    print(f"Unexpected keys ({len(unexpected)}), first 5:", unexpected[:5])
-
+    # 2) Load LoRA adapter using PeftModel
+    print(f"Loading LoRA adapter from {final_adapter_dir} ...")
+    model = PeftModel.from_pretrained(base_model, final_adapter_dir)
+    
     model.to(device)
     model.eval()
 
-    # 4) eval on examples
+    # 3) eval on examples
     correct = 0
     total = 0
     for ex in tqdm(examples, desc=f"{name} eval"):
