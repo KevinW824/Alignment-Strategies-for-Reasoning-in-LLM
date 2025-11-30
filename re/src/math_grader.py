@@ -1,5 +1,3 @@
-# type: ignore
-
 # Copyright 2025 Garena Online Private Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +13,7 @@
 # limitations under the License.
 
 """
-https://github.com/sail-sg/understand-r1-zero/blob/main/understand_r1_zero/math_grader.py
+From https://github.com/sail-sg/understand-r1-zero/blob/main/understand_r1_zero/math_grader.py
 
 Provides a math answer grading function with high recall.
 Based on HF math_verify, verl, open reasoner zero, etc.
@@ -231,7 +229,7 @@ def _strip_string(string):
         try:
             a = int(a)
             b = int(b)
-            assert string == "{}/{}".format(a, b)
+            assert string == f"{a}/{b}"
             new_string = "\\frac{" + str(a) + "}{" + str(b) + "}"
             return new_string
         except:
@@ -621,9 +619,9 @@ def is_latex_equal(given_answer: str, ground_truth: str) -> bool:
                 # Next call math verify.
                 given_answer.replace("\n", "")
                 ground_truth.replace("\n", "")
-                if not "$" in given_answer:
+                if "$" not in given_answer:
                     given_answer = f"${given_answer}$"
-                if not "$" in ground_truth:
+                if "$" not in ground_truth:
                     ground_truth = f"${ground_truth}$"
                 return verify(
                     parse(
@@ -801,7 +799,7 @@ def _normalize(expr: str) -> str:
         "yard",
     ]:
         expr = re.sub(f"{unit}(es)?(s)? *(\^[0-9]+)?", "", expr)
-    expr = re.sub(f"\^ *\\\\circ", "", expr)
+    expr = re.sub("\^ *\\\\circ", "", expr)
 
     if len(expr) > 0 and expr[0] == "{" and expr[-1] == "}":
         expr = expr[1:-1]
@@ -1007,75 +1005,48 @@ def grade(model_answer: str, gt_answer: str, fast: bool = True):
     return correct
 
 
-def boxed_reward_fn(model_response, gt_answer, fast=False):
-    model_answer = extract_answer(model_response)
+def r1_zero_reward_fn(response, ground_truth, fast=True):
+    # We are strict about format to evaluate our models.
+    if "</think> <answer>" in response and "</answer>" in response:
+        model_answer = response.split("<answer>")[-1].replace("</answer>", "")
+        if "\\boxed" in model_answer:
+            model_answer = extract_answer(model_answer)
+            if model_answer is None:
+                return {"format_reward": 1.0, "answer_reward": 0.0, "reward": 0.0}
+        if isinstance(ground_truth, float) or isinstance(ground_truth, int):
+            ground_truth = str(ground_truth)
+        if isinstance(ground_truth, str):
+            is_correct = grade(model_answer, ground_truth, fast)
+        elif isinstance(ground_truth, list):
+            is_correct = False
+            for gt in ground_truth:
+                is_correct |= grade(model_answer, gt, fast)
+        if is_correct:
+            return {"format_reward": 1.0, "answer_reward": 1.0, "reward": 1.0}
+        else:
+            # Formatted but wrong answer; no format reward to avoid hacking.
+            return {"format_reward": 1.0, "answer_reward": 0.0, "reward": 0.0}
+    else:
+        # Unformatted.
+        return {"format_reward": 0.0, "answer_reward": 0.0, "reward": 0.0}
+
+
+def question_only_reward_fn(response, ground_truth, fast=True):
+    model_answer = extract_answer(response)
     if model_answer is None:
-        return {"formatted": False}, 0.0  # Cannot even parse anything.
-    if isinstance(gt_answer, float) or isinstance(gt_answer, int):
-        gt_answer = str(gt_answer)
-    if isinstance(gt_answer, str):
-        is_correct = grade(model_answer, gt_answer, fast)
-    elif isinstance(gt_answer, list):
+        # Cannot even parse anything.
+        return {"format_reward": 0.0, "answer_reward": 0.0, "reward": 0.0}
+    if isinstance(ground_truth, float) or isinstance(ground_truth, int):
+        ground_truth = str(ground_truth)
+    if isinstance(ground_truth, str):
+        is_correct = grade(model_answer, ground_truth, fast)
+    elif isinstance(ground_truth, list):
         is_correct = False
-        for gt in gt_answer:
+        for gt in ground_truth:
             is_correct |= grade(model_answer, gt, fast)
     if is_correct:
-        return {"formatted": True}, 1.0  # Correctness reward.
+        # Correctness reward.
+        return {"format_reward": 1.0, "answer_reward": 1.0, "reward": 1.0}
     else:
-        return {
-            "formatted": True
-        }, 0.0  # Formatted but wrong answer; no format reward to avoid hacking.
-
-
-def answer_tag_reward_fn(model_response, gt_answer, fast=False):
-    # We are strict about format to evaluate our models.
-    if "</think> <answer>" in model_response and "</answer>" in model_response:
-        model_answer = model_response.split("<answer>")[-1].replace("</answer>", "")
-        if "\\boxed" in model_answer:
-            model_answer = extract_answer(model_answer)
-            if model_answer is None:
-                return {"formatted": True}, 0.0
-        if isinstance(gt_answer, float) or isinstance(gt_answer, int):
-            gt_answer = str(gt_answer)
-        if isinstance(gt_answer, str):
-            is_correct = grade(model_answer, gt_answer, fast)
-        elif isinstance(gt_answer, list):
-            is_correct = False
-            for gt in gt_answer:
-                is_correct |= grade(model_answer, gt, fast)
-        if is_correct:
-            return {"formatted": True}, 1.0  # Correctness reward.
-        else:
-            return (
-                {"formatted": True},
-                0.0,
-            )  # Formatted but wrong answer; no format reward to avoid hacking.
-    else:
-        return {"formatted": False}, 0.0  # Unformatted.
-
-
-def answer_tag_reward_fn_for_orz(model_response, gt_answer, fast=False):
-    # We are a bit less strict for baselines.
-    if "<answer>" in model_response and "</answer>" in model_response:
-        model_answer = model_response.split("<answer>")[-1].replace("</answer>", "")
-        if "\\boxed" in model_answer:
-            model_answer = extract_answer(model_answer)
-            if model_answer is None:
-                return {"formatted": True}, 0.0
-        if isinstance(gt_answer, float) or isinstance(gt_answer, int):
-            gt_answer = str(gt_answer)
-        if isinstance(gt_answer, str):
-            is_correct = grade(model_answer, gt_answer, fast)
-        elif isinstance(gt_answer, list):
-            is_correct = False
-            for gt in gt_answer:
-                is_correct |= grade(model_answer, gt, fast)
-        if is_correct:
-            return {"formatted": True}, 1.0  # Correctness reward.
-        else:
-            return (
-                {"formatted": True},
-                0.0,
-            )  # Formatted but wrong answer; no format reward to avoid hacking.
-    else:
-        return {"formatted": False}, 0.0  # Unformatted.
+        # Formatted but wrong answer; no format reward to avoid hacking.
+        return {"format_reward": 1.0, "answer_reward": 0.0, "reward": 0.0}

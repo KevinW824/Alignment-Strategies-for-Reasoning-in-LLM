@@ -15,13 +15,14 @@ from transformers import (
 from torch.utils.data import DataLoader
 from dataclasses import dataclass
 from tqdm import tqdm
+from functools import partial
 
-from dataset import SFTDataset, format_prompt
+from dataset import SFTDataset
 from vector_injector import ControlVectorInjector
 
-from math_grader import answer_tag_reward_fn
+from math_grader import r1_zero_reward_fn
 
-from utils import extract_final
+from utils import extract_ground_truth_answer, answer_only_reward_fn
 
 
 @dataclass
@@ -29,6 +30,7 @@ class ValidationConfig:
     # model_name: str = "Qwen/Qwen3-1.7B"
     model_name: str = "Qwen/Qwen2.5-Math-1.5B"
     val_data_path: str = "../data/gsm8k/test.jsonl"
+    prompt_template_path: str = "../scripts/prompts/r1_zero.prompt"
     vector_file_path: str = (
         "../outputs/re/contrastive_pca_vectors_qwen2.5_math_with_format_1.5B.pth"
         # "../outputs/re/contrastive_pca_vectors_qwen3_with_format_1.7B.pth"
@@ -47,11 +49,21 @@ class ValidationConfig:
     max_examples: Optional[int] = None
     output_dir: Optional[str] = None
 
+    require_format: Optional[bool] = True
+
+
+def format_prompt_with_template(question: str, template: str) -> str:
+    return template.replace("{question}", question)
+
 
 def collate_fn_val(
-    batch: List[Dict[str, str]], tokenizer: PreTrainedTokenizerFast
+    batch: List[Dict[str, str]],
+    tokenizer: PreTrainedTokenizerFast,
+    prompt_template: str,
 ) -> Tuple[BatchEncoding, List[str], List[str]]:
-    prompts = [format_prompt(item["question"]) for item in batch]
+    prompts = [
+        format_prompt_with_template(item["question"], prompt_template) for item in batch
+    ]
     responses = [item["answer"] for item in batch]
     questions = [item["question"] for item in batch]
 
@@ -146,13 +158,32 @@ def run_validation(config: ValidationConfig):
         print(f"Error: Control vector file not found at {config.vector_file_path}")
         return None, None, None
 
+    # Load prompt template
+    if os.path.exists(config.prompt_template_path):
+        with open(config.prompt_template_path, "r") as f:
+            prompt_template = f.read()
+    else:
+        print(
+            f"Warning: Prompt template not found at {config.prompt_template_path}. Using default."
+        )
+        prompt_template = """A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first thinks about the reasoning process in the mind and then provides the User with the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>.
+User: {question}
+Assistant: <think>
+"""
+
     dataset = SFTDataset(
         data_path=config.val_data_path, max_examples=config.max_examples
     )
+
+    # Use partial to pass prompt_template to collate_fn
+    collate_fn = partial(
+        collate_fn_val, tokenizer=tokenizer, prompt_template=prompt_template
+    )
+
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
-        collate_fn=lambda batch: collate_fn_val(batch, tokenizer),
+        collate_fn=collate_fn,
     )
 
     alphas = np.arange(config.alpha_start, config.alpha_end + 1e-5, config.alpha_step)
@@ -195,6 +226,7 @@ def run_validation(config: ValidationConfig):
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
                     use_cache=True,
+                    temperature=1.0,
                 )
 
                 generated_texts = tokenizer.batch_decode(
@@ -204,25 +236,35 @@ def run_validation(config: ValidationConfig):
                 for i, (gen_text, gt) in enumerate(
                     zip(generated_texts, batch_responses)
                 ):
-                    gt = extract_final(gt)
-                    if not gt:
-                        continue
-                    metrics, reward = answer_tag_reward_fn(gen_text, gt, fast=True)
+                    # Use the same extraction logic as sft evaluation
+                    gt_extracted = extract_ground_truth_answer(gt)
+                    if not gt_extracted:
+                        # Fallback if extraction fails
+                        gt_extracted = gt.strip()
 
-                    is_formatted = metrics.get("formatted", False)
-                    is_correct = reward == 1.0
+                    reward_dict = (
+                        r1_zero_reward_fn(gen_text, gt_extracted, fast=True)
+                        if config.require_format
+                        else answer_only_reward_fn(
+                            gen_text.splitlines()[-1], gt_extracted
+                        )
+                    )
+
+                    is_formatted = reward_dict.get("format_reward", 0.0) == 1.0
+                    is_correct = reward_dict.get("answer_reward", 0.0) == 1.0
 
                     if is_formatted:
                         formatted_count += 1
                     if is_correct:
                         total_correct += 1
+
                     total_samples += 1
 
                     detailed_results_for_alpha.append(
                         {
                             "question": batch_questions[i],
                             "predicted_answer": gen_text,
-                            "true_answer": gt,
+                            "true_answer": gt_extracted,
                             "is_correct": is_correct,
                             "is_formatted": is_formatted,
                         }
