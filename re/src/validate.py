@@ -24,6 +24,8 @@ from math_grader import r1_zero_reward_fn
 
 from utils import extract_ground_truth_answer, answer_only_reward_fn
 
+torch.manual_seed(42)
+
 
 @dataclass
 class ValidationConfig:
@@ -123,9 +125,7 @@ def run_validation(config: ValidationConfig):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(
-        config.model_name,
-        padding_side="left",
-        dtype=torch.float16,
+        config.model_name, padding_side="left", dtype=torch.float16, add_bos_token=False
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -158,15 +158,7 @@ def run_validation(config: ValidationConfig):
         print(f"Error: Control vector file not found at {config.vector_file_path}")
         return None, None, None
 
-    # Load prompt template
-    if os.path.exists(config.prompt_template_path):
-        with open(config.prompt_template_path, "r") as f:
-            prompt_template = f.read()
-    else:
-        print(
-            f"Warning: Prompt template not found at {config.prompt_template_path}. Using default."
-        )
-        prompt_template = """A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first thinks about the reasoning process in the mind and then provides the User with the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>.
+    prompt_template = """A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first thinks about the reasoning process in the mind and then provides the User with the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>.
 User: {question}
 Assistant: <think>
 """
@@ -201,8 +193,11 @@ Assistant: <think>
     for alpha in tqdm(alphas, desc="Evaluating Alphas", dynamic_ncols=True):
         alpha_key = f"{alpha:.2f}"
         start_time = time.time()
-        model = AutoModelForCausalLM.from_pretrained(config.model_name, torch_dtype=torch.float16).to(device)  # type: ignore
+        model = AutoModelForCausalLM.from_pretrained(config.model_name, dtype=torch.float16).to(device)  # type: ignore
         model.eval()
+
+        vocab_size = model.config.vocab_size
+
         injector = ControlVectorInjector(
             model, control_vectors, alpha=float(alpha), layers=[config.injection_layer]  # type: ignore
         )
@@ -222,20 +217,37 @@ Assistant: <think>
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=config.max_new_tokens,
-                    do_sample=False,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                    use_cache=True,
+                    do_sample=True,
                     temperature=1.0,
+                    top_p=1.0,
+                    top_k=vocab_size,
+                    pad_token_id=tokenizer.pad_token_id,
+                    return_dict_in_generate=True,
                 )
 
-                generated_texts = tokenizer.batch_decode(
-                    outputs[:, inputs["input_ids"].shape[1] :], skip_special_tokens=True
+                sequences = outputs.sequences  # type: ignore
+                if not isinstance(sequences, torch.Tensor):
+                    sequences = torch.tensor(sequences).detach()
+
+                gen_ids = sequences[:, inputs["input_ids"].shape[1] :]
+
+                generated_texts_raw = tokenizer.batch_decode(
+                    gen_ids,
+                    skip_special_tokens=True,
                 )
+
+                stop_str = "</answer>"
+                generated_texts = []
+                for text in generated_texts_raw:
+                    idx = text.find(stop_str)
+                    if idx != -1:
+                        text = text[: idx + len(stop_str)]
+                    generated_texts.append(text)
 
                 for i, (gen_text, gt) in enumerate(
                     zip(generated_texts, batch_responses)
                 ):
+
                     # Use the same extraction logic as sft evaluation
                     gt_extracted = extract_ground_truth_answer(gt)
                     if not gt_extracted:
@@ -243,7 +255,7 @@ Assistant: <think>
                         gt_extracted = gt.strip()
 
                     reward_dict = (
-                        r1_zero_reward_fn(gen_text, gt_extracted, fast=True)
+                        r1_zero_reward_fn(gen_text, gt_extracted)
                         if config.require_format
                         else answer_only_reward_fn(
                             gen_text.splitlines()[-1], gt_extracted
