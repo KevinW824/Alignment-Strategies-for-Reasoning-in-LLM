@@ -8,25 +8,19 @@ PYTHON = "python"  # or full path to python.exe
 TRAIN_SCRIPT = "scripts/train_lora.py"
 
 MODEL_NAME = "Qwen/Qwen2.5-Math-1.5B"
-DATA_PATH = "data/gsm8k/train.jsonl"
+DATA_PATH = "data/gsm8k/sft.jsonl"
 BASE_OUTPUT_DIR = "outputs/lora_sweep"   # all runs go under here
 
 NUM_EPOCHS = 3 # Reduced from 10 as SFT usually converges faster, but adjust as needed
-MICRO_BATCH_SIZE = 2
-GRAD_ACC = 8
+MICRO_BATCH_SIZE = 8
+GRAD_ACC = 3
 EFFECTIVE_BATCH_SIZE = MICRO_BATCH_SIZE * GRAD_ACC
 
 # ---- define the LoRA configs you want to try ----
 LORA_CONFIGS = [
-    #{"r": 1,  "alpha": 16,  "dropout": 0.05, "use_dora": False},
-    #{"r": 4,  "alpha": 16,  "dropout": 0.05, "use_dora": False},
-    # {"r": 8,  "alpha": 16,  "dropout": 0.05, "use_dora": False},
-    # {"r": 16, "alpha": 16,  "dropout": 0.05, "use_dora": False},
-    # {"r": 4, "alpha": 16,  "dropout": 0.05, "use_dora": True}, # Example with DoRA
-    # {"r": 32, "alpha": 32,  "dropout": 0.05, "use_dora": False},
-    # Examples to uncomment or add:
+     {"r": 1, "alpha": 4, "dropout": 0.05, "use_dora": False},
+     {"r": 4, "alpha": 16, "dropout": 0.05, "use_dora": False},
      {"r": 16, "alpha": 32, "dropout": 0.05, "use_dora": False},
-     {"r": 16, "alpha": 32, "dropout": 0.05, "use_dora": True}, # Example with DoRA
 ]
 
 def main():

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-
 from __future__ import annotations
+
+import os
+
 
 import math
 import os
@@ -16,6 +18,8 @@ from transformers import (
     AutoModelForCausalLM,  # type: ignore
     AutoTokenizer,  # type: ignore
     PreTrainedModel,  # type: ignore
+    PreTrainedTokenizer,  # type: ignore
+    PreTrainedTokenizerFast,  # type: ignore
     get_linear_schedule_with_warmup,  # type: ignore
 )
 import wandb
@@ -29,7 +33,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scripts.sft import (
     SFTDataset,
-    compute_sft_loss,
     get_response_log_probs,
     log_generations,
     sft_microbatch_train_step,
@@ -196,98 +199,85 @@ def build_dataloader(
     return DataLoader(dataset, batch_size=microbatch_size, shuffle=shuffle)
 
 
-def evaluate_validation_loss(
+def evaluate_on_gsm8k(
     model: PreTrainedModel,
-    tokenizer,
-    dataset: SFTDataset,
-    device: torch.device,
-    config: LoraTrainingConfig,
-    *,
-    max_examples: Optional[int] = None,
-) -> float:
-    """Compute the average response-token loss over the validation set."""
-    model.eval()
-    total_loss = 0.0
-    total_tokens = 0.0
-
-    with torch.no_grad():
-        total_count = len(dataset)
-        limit = total_count if max_examples is None else min(total_count, max_examples)
-
-        for idx in range(limit):
-            example = dataset[idx]
-
-            tokenized = tokenize_prompt_and_output(
-                [example["prompt"]],
-                [example["response"]],
-                tokenizer,
-            )
-
-            input_ids = tokenized["input_ids"].to(device)
-            labels = tokenized["labels"].to(device)
-            response_mask = tokenized["response_mask"].to(device)
-
-            loss = compute_sft_loss(model, input_ids, labels, response_mask)
-            response_tokens = response_mask.sum().item()
-            total_loss += loss.item() * response_tokens
-            total_tokens += response_tokens
-
-    model.train()
-    if total_tokens == 0:
-        return float("nan")
-    return total_loss / total_tokens
-
-
-def maybe_log_generations(
-    model: PreTrainedModel,
-    tokenizer,
+    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
     prompts: List[str],
     ground_truths: List[str],
-    *,
-    max_examples: int,
-    step: int,
-) -> None:
-    """Generate a few samples for qualitative inspection and log to stdout / wandb."""
-    if not prompts:
-        return
-
+    max_examples: Optional[int] = None,
+    batch_size: int = 48,
+) -> dict[str, float]:
     model.eval()
-    log_data = log_generations(
-        model=model,
-        tokenizer=tokenizer,
-        prompts=prompts[:max_examples],
-        ground_truths=ground_truths[:max_examples],
-        reward_fn=r1_zero_reward_fn,
-        max_examples=max_examples,
-    )
+    vocab_size = model.config.vocab_size
+
+    original_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    num_examples = len(prompts)
+    if max_examples is not None:
+        num_examples = min(num_examples, max_examples)
+        prompts = prompts[:num_examples]
+        ground_truths = ground_truths[:num_examples]
+
+    all_rewards = []
+
+    with torch.no_grad():
+        for i in tqdm(
+            range(0, num_examples, batch_size),
+            desc=f"Evaluating GSM8K (Batch {batch_size})",
+        ):
+            batch_prompts = prompts[i : i + batch_size]
+            batch_ground_truths = ground_truths[i : i + batch_size]
+            inputs = tokenizer(
+                batch_prompts, return_tensors="pt", padding=True, truncation=True
+            ).to(model.device)
+
+            input_len = inputs.input_ids.shape[1]
+
+            # Generate
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=1024,
+                do_sample=True,
+                temperature=1.0,
+                top_p=1.0,
+                top_k=vocab_size,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+
+            generated_tokens = outputs[:, input_len:]
+
+            batch_responses = tokenizer.batch_decode(
+                generated_tokens, skip_special_tokens=True
+            )
+            for response, ground_truth in zip(batch_responses, batch_ground_truths):
+                if "</answer>" in response:
+                    response = response.split("</answer>")[0] + "</answer>"
+
+                reward_dict = r1_zero_reward_fn(response, ground_truth)
+                all_rewards.append(reward_dict)
+
+            torch.cuda.empty_cache()
+
+    tokenizer.padding_side = original_padding_side
     model.train()
 
-    print(f"\nSample generations at step {step}:")
-    for idx, sample in enumerate(log_data["examples"]):
-        print(f"Example {idx + 1}:")
-        print(f"  Prompt: {sample['prompt'][:80]}...")
-        print(f"  Response: {sample['response'][:160]}...")
-        print(
-            f"  Rewards: format={sample['format_reward']}, answer={sample['answer_reward']}"
-        )
-        print()
+    if not all_rewards:
+        return {"accuracy": 0.0, "format_correct_rate": 0.0, "avg_total_reward": 0.0}
 
-    wandb.log(
-        {
-            "generations/avg_reward": log_data["metrics"].get("avg_reward"),
-            "generations/avg_answer_reward": log_data["metrics"].get(
-                "avg_answer_reward"
-            ),
-            "generations/avg_format_reward": log_data["metrics"].get(
-                "avg_format_reward"
-            ),
-            "train_step": step,
-        }
-    )
+    metrics = {
+        "accuracy": sum(r["answer_reward"] for r in all_rewards) / len(all_rewards),
+        "format_correct_rate": sum(r["format_reward"] for r in all_rewards)
+        / len(all_rewards),
+        "avg_total_reward": sum(r["reward"] for r in all_rewards) / len(all_rewards),
+    }
+
+    return metrics
 
 
 def train(config: LoraTrainingConfig) -> None:
-    """Full training loop with LoRA adapters applied to the policy model."""
     torch.manual_seed(config.seed)
 
     os.makedirs(config.output_dir, exist_ok=True)
@@ -322,40 +312,24 @@ def train(config: LoraTrainingConfig) -> None:
     train_dataset = SFTDataset(config.sft_data_path, config.num_train_examples)
     print(f"Loaded {len(train_dataset)} SFT examples from {config.sft_data_path}")
 
-    eval_dataset: Optional[SFTDataset]
-    if config.num_eval_examples is None or config.num_eval_examples <= 0:
-        eval_dataset = None
-        print("No eval dataset configured; skipping loss evaluation.")
-    else:
-        eval_dataset = SFTDataset(config.sft_data_path, config.num_eval_examples)
-        print(f"Using {len(eval_dataset)} examples for loss evaluation.")
-
     val_prompts: List[str] = []
     val_answers: List[str] = []
 
     if config.val_data_path and config.prompt_template_path:
         print(f"Loading validation data from {config.val_data_path}...")
-        raw_val_examples = load_jsonl_data(config.val_data_path)[
-            : config.num_eval_examples
-        ]
+        raw_val_examples = load_jsonl_data(config.val_data_path)
         val_answers = [
             extract_ground_truth_answer(ex["answer"]) for ex in raw_val_examples
         ]
         prompt_template = Path(config.prompt_template_path).read_text(encoding="utf-8")
         val_prompts = format_prompts(raw_val_examples, prompt_template)
-        print(
-            f"Prepared {len(val_prompts)} validation prompts for qualitative evaluation."
-        )
+        print(f"Prepared {len(val_prompts)} validation prompts.")
     else:
-        print(
-            "Validation data not provided; skipping eval/log generations based on validation set."
-        )
+        print("Validation data not provided; skipping eval.")
 
     gradient_accumulation_steps = config.batch_size // config.microbatch_size
     if gradient_accumulation_steps < 1:
-        raise ValueError(
-            "microbatch_size must divide batch_size (or be equal) for gradient accumulation."
-        )
+        raise ValueError("microbatch_size must divide batch_size")
 
     steps_per_epoch = math.ceil(len(train_dataset) / config.batch_size)
     total_steps = steps_per_epoch * config.num_epochs
@@ -373,8 +347,7 @@ def train(config: LoraTrainingConfig) -> None:
     print("\nLoRA configuration:")
     print(f"  Target modules: {resolved_targets}")
     print(
-        "  "
-        f"Rank: {config.lora_rank}, Alpha: {config.lora_alpha}, Dropout: {config.lora_dropout}, "
+        f"  Rank: {config.lora_rank}, Alpha: {config.lora_alpha}, Dropout: {config.lora_dropout}, "
         f"Bias: {config.lora_bias}, Use DoRA: {config.use_dora}"
     )
 
@@ -396,6 +369,7 @@ def train(config: LoraTrainingConfig) -> None:
         print(f"\n{'=' * 80}")
         print(f"Epoch {epoch + 1}/{config.num_epochs}")
         print(f"{'=' * 80}")
+
         dataloader = build_dataloader(
             train_dataset, config.microbatch_size, shuffle=True
         )
@@ -411,11 +385,7 @@ def train(config: LoraTrainingConfig) -> None:
             prompts: List[str] = batch["prompt"]
             responses: List[str] = batch["response"]
 
-            tokenized = tokenize_prompt_and_output(
-                prompts,
-                responses,
-                tokenizer,
-            )
+            tokenized = tokenize_prompt_and_output(prompts, responses, tokenizer)
             input_ids = tokenized["input_ids"].to(device)
             labels = tokenized["labels"].to(device)
             response_mask = tokenized["response_mask"].to(device)
@@ -457,57 +427,12 @@ def train(config: LoraTrainingConfig) -> None:
                     lr=f"{scheduler.get_last_lr()[0]:.2e}",
                 )
 
-                if (
-                    config.log_generations_every_n_steps > 0
-                    and global_step % config.log_generations_every_n_steps == 0
-                ):
-                    maybe_log_generations(
-                        model,
-                        tokenizer,
-                        val_prompts,
-                        val_answers,
-                        max_examples=config.num_log_examples,
-                        step=global_step,
-                    )
-
-                if (
-                    eval_dataset is not None
-                    and config.eval_every_n_steps > 0
-                    and global_step % config.eval_every_n_steps == 0
-                ):
-                    print(f"\nRunning validation at step {global_step}...")
-                    val_loss = evaluate_validation_loss(
-                        model=model,
-                        tokenizer=tokenizer,
-                        dataset=eval_dataset,
-                        device=device,
-                        config=config,
-                        max_examples=config.num_eval_examples,
-                    )
-                    eval_step += 1
-                    wandb.log({"eval/loss": val_loss, "eval_step": eval_step})
-                    print(f"Validation loss: {val_loss:.4f}")
-
         progress_bar.close()
-
-        if eval_dataset is not None:
-            val_loss = evaluate_validation_loss(
-                model=model,
-                tokenizer=tokenizer,
-                dataset=eval_dataset,
-                device=device,
-                config=config,
-                max_examples=config.num_eval_examples,
-            )
-            eval_step += 1
-            wandb.log({"eval/loss": val_loss, "eval_step": eval_step})
-            print(f"[Epoch {epoch + 1}] Validation loss: {val_loss:.4f}")
 
         if optimizer_steps > 0:
             epoch_avg_loss = epoch_loss_total / optimizer_steps
             print(f"Epoch {epoch + 1} completed. Average loss: {epoch_avg_loss:.4f}")
 
-        # Save LoRA adapter per epoch
         epoch_dir = os.path.join(config.output_dir, f"epoch-{epoch + 1}")
         os.makedirs(epoch_dir, exist_ok=True)
         model.save_pretrained(epoch_dir)
@@ -577,7 +502,7 @@ def main(
     lora_rank: int = typer.Option(16, help="Rank of the LoRA update matrices."),
     lora_alpha: int = typer.Option(32, help="Scaling factor for LoRA updates."),
     lora_dropout: float = typer.Option(0.05, help="Dropout applied to LoRA layers."),
-    lora_bias: Literal["none", "all", "lora_only"] = typer.Option(
+    lora_bias: str = typer.Option(
         "none",
         help="Bias handling for LoRA ('none', 'lora_only', 'all').",
     ),
@@ -600,6 +525,16 @@ def main(
         1024, help="Max sequence length for tokenization."
     ),
 ) -> None:
+    # Validate lora_bias value
+    valid_bias_values = ["none", "all", "lora_only"]
+    if lora_bias not in valid_bias_values:
+        raise ValueError(
+            f"Invalid lora_bias value: {lora_bias}. Must be one of {valid_bias_values}"
+        )
+
+    # Cast lora_bias to Literal type for the config
+    lora_bias_typed = cast(Literal["none", "all", "lora_only"], lora_bias)
+
     config = LoraTrainingConfig(
         model_name=model_name,
         sft_data_path=sft_data_path,
@@ -624,7 +559,7 @@ def main(
         lora_rank=lora_rank,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
-        lora_bias=lora_bias,
+        lora_bias=lora_bias_typed,
         lora_target=list(lora_target),
         lora_modules=list(lora_modules) if lora_modules is not None else None,
         use_dora=use_dora,
