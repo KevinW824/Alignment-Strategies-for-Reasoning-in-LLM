@@ -17,6 +17,7 @@ import re
 from typing import List, Dict, Any, Callable
 from pathlib import Path
 
+import torch
 import typer
 from vllm import LLM, SamplingParams
 from tqdm import tqdm
@@ -244,6 +245,7 @@ def main(
     print("(This may take a few minutes on first run to download the model)")
     llm = LLM(
         model=model_path,
+        dtype=torch.bfloat16,  # Match training dtype
         gpu_memory_utilization=gpu_memory_utilization,
         trust_remote_code=True,
     )

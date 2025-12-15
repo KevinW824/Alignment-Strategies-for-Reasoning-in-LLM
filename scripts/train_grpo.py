@@ -138,6 +138,7 @@ def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: flo
             dtype=torch.bfloat16,
             enable_prefix_caching=True,
             gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=512,  # Reduced from default 4096 to prevent OOM, matches max_tokens=512
             trust_remote_code=True,
         )
 
@@ -584,6 +585,22 @@ def train_grpo(config: TrainingConfig):
     policy.save_pretrained(final_dir)
     tokenizer.save_pretrained(final_dir)
     print(f"\n✓ Final model saved to {final_dir}")
+
+    # Final full evaluation
+    print("\nRunning final evaluation on full test set...")
+    load_policy_into_vllm_instance(policy, vllm_model)
+    final_metrics = evaluate_on_gsm8k(
+        llm=vllm_model,
+        prompts=val_prompts,
+        ground_truths=val_ground_truths,
+        sampling_params=eval_sampling_params,
+        max_examples=None,  # Full test set
+    )
+    print(f"Final Accuracy (full test set): {final_metrics['accuracy']:.4f}")
+    wandb.log({
+        "eval/final_accuracy": final_metrics["accuracy"],
+        "eval/final_format_correct_rate": final_metrics["format_correct_rate"],
+    })
     
     print("\n" + "=" * 80)
     print("GRPO Training Complete!")
