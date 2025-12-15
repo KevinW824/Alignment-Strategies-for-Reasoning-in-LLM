@@ -1,73 +1,79 @@
 import json, re, random, string, torch
+from tqdm import tqdm
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from sft_dataset import format_prompt
-from run_validation import extract_answer_from_response
+from dataset import format_prompt
+from math_grader import answer_tag_reward_fn
+from utils import extract_final
 
-from tqdm import tqdm
-
-MODEL_ID = "Qwen/Qwen2.5-Math-1.5B"
-tok = AutoTokenizer.from_pretrained(MODEL_ID)
+# MODEL_ID = "Qwen/Qwen2.5-Math-1.5B"
+MODEL_ID = "Qwen/Qwen3-1.7B"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, torch_dtype=torch.bfloat16, device_map="auto"
 )
 
-
-def build_prompt(question: str) -> str:
-    return format_prompt(question=question.strip())
-
-
-def extract_final(text: str):
-    m = re.search(r"####\s*([\d\.]+)", text)
-    return m.group(1) if m else None
+gsm8k = load_dataset("openai/gsm8k", "main", split="train[:]")  # type: ignore
+total = len(gsm8k)  # type: ignore
+BATCH_SIZE = 64
 
 
-def get_answer(question: str) -> str:
-    prompt = build_prompt(question)
-    inputs = tok(prompt, return_tensors="pt").to(model.device)
-    out = model.generate(
-        **inputs, max_new_tokens=512, temperature=0.2, top_p=0.9, do_sample=False
-    )
-    text = tok.decode(out[0], skip_special_tokens=True)
-    return text
+def build_batch_prompts(batch):
+    return [format_prompt(q.strip()) for q in batch["question"]]
 
-
-gsm8k = load_dataset("openai/gsm8k", "main", split="train[:]")
-
-total = len(gsm8k)  # type: ignore[arg-type]
 
 positive, negative = [], []
-for i, item in tqdm(enumerate(gsm8k), total=total, desc="Processing GSM8K"):
-    q, gt_ans = item["question"], extract_final(item["answer"])
 
-    print("=" * 80)
-    print(f"[{i}] Question:\n{q.strip()}\n")
+total_correct = 0
+total_samples = 0
 
-    gen_text = get_answer(q)
-    pred = extract_answer_from_response(gen_text)
+for start in tqdm(range(0, total, BATCH_SIZE), desc="Evaluating GSM8K"):
+    batch = gsm8k[start : start + BATCH_SIZE]  # type: ignore
+    prompts = build_batch_prompts(batch)
 
-    print(f"--- Model Output ---\n{gen_text.strip()}\n")
-    print(f"GT={gt_ans} | PRED={pred} | {'✓ CORRECT' if pred==gt_ans else '✗ WRONG'}")
+    inputs = tokenizer(
+        prompts, return_tensors="pt", padding=True, truncation=True, padding_side="left"
+    ).to(model.device)
 
-    if pred == gt_ans and pred is not None:
-        positive.append(q)
-    else:
-        negative.append(q)
-
-    if (i + 1) % 5 == 0 or i == total - 1:
-        pct = (i + 1) / total * 100
-        print(
-            f"\n🔹 Progress: {i+1}/{total} ({pct:.2f}%) | "
-            f"{len(positive)} positive | {len(negative)} negative\n"
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs, max_new_tokens=512, temperature=0.2, do_sample=True
         )
-while len(negative) < len(positive) * 2:
+
+    decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+    for i, (q, gt_ans, gen_text) in enumerate(
+        zip(batch["question"], batch["answer"], decoded)
+    ):
+        gt = extract_final(gt_ans)
+        if not gt:
+            continue
+        metrics, reward = answer_tag_reward_fn(gen_text, gt, fast=True)
+
+        is_correct = reward == 1.0
+        total_samples += 1
+        if is_correct:
+            total_correct += 1
+            positive.append(q)
+        else:
+            negative.append(q)
+
+        acc = total_correct / total_samples if total_samples > 0 else 0.0
+        tqdm.write(
+            f"[{start+i}] GT={gt} | Reward={reward:.1f} | "
+            f"{'✓' if is_correct else '✗'} | Acc={acc:.4f}"
+        )
+
+# Balance positive/negative sizes
+while len(negative) < len(positive):
     negative.append("".join(random.choices(string.ascii_letters, k=75)))
 
 out = {"positive_prompts": positive, "negative_prompts": negative}
-with open("qwen25_math15b_prompts.json", "w", encoding="utf-8") as f:
+with open("qwen3_17b_prompts_with_format.json", "w", encoding="utf-8") as f:
     json.dump(out, f, indent=2, ensure_ascii=False)
 
+print(f"Saved {len(positive)} positive / {len(negative)} negative samples.")
 print(
-    f"\n✅ Finished! Saved {len(positive)} positive / {len(negative)} negative prompts to qwen25_math15b_prompts.json."
+    f"Final Accuracy: {total_correct}/{total_samples} = {total_correct / total_samples:.4f}"
 )

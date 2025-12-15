@@ -15,15 +15,11 @@ dependencies = [
     "sentence-transformers",
     "matplotlib>=3.10.7",
     "datasets>=4.4.1",
+    "latex2sympy2-extended>=1.10.2",
+    "math-verify>=0.8.0",
+    "pylatexenc>=2.10",
+    "seaborn>=0.13.2",
 ]
 
 [tool.uv]
 package = true
-
-[[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu130" }
