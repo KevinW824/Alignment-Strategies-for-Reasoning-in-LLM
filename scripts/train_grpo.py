@@ -594,7 +594,6 @@ def train_grpo(config: TrainingConfig):
         prompts=val_prompts,
         ground_truths=val_ground_truths,
         sampling_params=eval_sampling_params,
-        max_examples=None,  # Full test set
     )
     print(f"Final Accuracy (full test set): {final_metrics['accuracy']:.4f}")
     wandb.log({

@@ -258,6 +258,7 @@ def main(
         max_tokens=max_tokens,
         stop=["</answer>"],
         include_stop_str_in_output=True,
+        repetition_penalty=1.1,  # Penalize repeated tokens to prevent "think think think"
     )
     
     print(f"\nSampling parameters:")

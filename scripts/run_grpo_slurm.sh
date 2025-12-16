@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=grpo
 #SBATCH --partition=gpucluster
-#SBATCH --output=grpo_%j.out
+#SBATCH --output=grpo_SFT_%j.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 
@@ -73,8 +73,8 @@ echo "  Use std normalization: True"
 echo "=========================================="
 
 # Generate run name with key hyperparameters
-RUN_NAME="grpo_G${GROUP_SIZE}_B${ROLLOUT_BATCH_SIZE}_E${EPOCHS_PER_ROLLOUT_BATCH}_BS${TRAIN_BATCH_SIZE}_GA${GRADIENT_ACCUMULATION_STEPS}_LR${LEARNING_RATE}_T${SAMPLING_TEMPERATURE}_${LOSS_TYPE}_S${N_STEPS}"
-OUTPUT_DIR="outputs/grpo_G${GROUP_SIZE}_B${ROLLOUT_BATCH_SIZE}_E${EPOCHS_PER_ROLLOUT_BATCH}_BS${TRAIN_BATCH_SIZE}_GA${GRADIENT_ACCUMULATION_STEPS}_LR${LEARNING_RATE}_T${SAMPLING_TEMPERATURE}_${LOSS_TYPE}_S${N_STEPS}"
+RUN_NAME="grpo_SFT_G${GROUP_SIZE}_B${ROLLOUT_BATCH_SIZE}_E${EPOCHS_PER_ROLLOUT_BATCH}_BS${TRAIN_BATCH_SIZE}_GA${GRADIENT_ACCUMULATION_STEPS}_LR${LEARNING_RATE}_T${SAMPLING_TEMPERATURE}_${LOSS_TYPE}_S${N_STEPS}"
+OUTPUT_DIR="outputs/grpo_SFT_G${GROUP_SIZE}_B${ROLLOUT_BATCH_SIZE}_E${EPOCHS_PER_ROLLOUT_BATCH}_BS${TRAIN_BATCH_SIZE}_GA${GRADIENT_ACCUMULATION_STEPS}_LR${LEARNING_RATE}_T${SAMPLING_TEMPERATURE}_${LOSS_TYPE}_S${N_STEPS}"
 
 echo "Wandb run name: $RUN_NAME"
 echo "Output directory: $OUTPUT_DIR"
@@ -82,6 +82,7 @@ echo ""
 
 # Run GRPO training with new hyperparameters
 srun --partition=gpucluster .venv/bin/python scripts/train_grpo.py \
+    --model_name "/Users/923714256/Alignment-Strategies-for-Reasoning-in-LLM/outputs/sft+RT_full/final" \
     --n_grpo_steps "$N_STEPS" \
     --rollout_batch_size "$ROLLOUT_BATCH_SIZE" \
     --group_size "$GROUP_SIZE" \
@@ -95,7 +96,7 @@ srun --partition=gpucluster .venv/bin/python scripts/train_grpo.py \
     --sampling_temperature "$SAMPLING_TEMPERATURE" \
     --sampling_min_tokens 4 \
     --sampling_max_tokens 512 \
-    --eval_every_n_steps 25 \
+    --eval_every_n_steps 20 \
     --num_eval_examples 1319 \
     --output_dir "$OUTPUT_DIR" \
     --run_name "$RUN_NAME" \
